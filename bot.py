@@ -1,10 +1,3 @@
-"""
-Telegram bot — Python (aiogram 3) + data.json
-
-Ishga tushirish:
-    pip install -r requirements.txt
-    python bot.py
-"""
 import asyncio
 import json
 import logging
@@ -23,41 +16,39 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    Update,
 )
+from fastapi import FastAPI, Request
 
 # ---------------------------------------------------------------------
-# 1. Sozlamalar — token va admin ID shu yerga yoziladi
+# 1. Sozlamalar — Environment variables (Vercel dashboard orqali olinadi)
 # ---------------------------------------------------------------------
-BOT_TOKEN = "8608626990:AAHkuaH4ES9vsPR-EQlMRdWS_Wwdcu_cmj0"  # @BotFather bergan token
-
-ADMIN_ID = "944890609"                          # Admin Telegram ID raqami
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8608626990:AAHkuaH4ES9vsPR-EQlMRdWS_Wwdcu_cmj0")
+ADMIN_ID = os.getenv("ADMIN_ID", "944890609")
 ADMIN_LINK = "https://t.me/zohirshoh_13"
-
-if "BU_YERGA" in BOT_TOKEN or not ADMIN_ID.isdigit():
-    raise SystemExit("❌ bot.py ichida BOT_TOKEN va ADMIN_ID ni to'ldiring!")
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+app = FastAPI()
 
 # ---------------------------------------------------------------------
-# 2. Ma'lumotlar bazasi (data.json)
+# 2. Ma'lumotlar bazasi (Vercel ephemeral disk uchun /tmp ichida saqlanadi)
 # ---------------------------------------------------------------------
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
+DB_PATH = "/tmp/data.json"
 
 
 def default_data() -> dict:
     return {
-        "users": {},          # { "id": {id, name, username, phone, active, date} }
-        "projects": [],       # [{name, photo, description, link}]
-        "info": "",           # "Ma'lumot" bo'limi matni
-        "announcement": None,  # eng so'nggi e'lon
-        "orders": [],         # [{id, user_id, type, details, date}]
+        "users": {},
+        "projects": [],
+        "info": "",
+        "announcement": None,
+        "orders": [],
     }
 
 
 def load_data() -> dict:
-    """data.json ni o'qiydi; yo'q bo'lsa bo'sh struktura bilan yaratadi."""
     data = default_data()
     if os.path.exists(DB_PATH):
         try:
@@ -71,24 +62,21 @@ def load_data() -> dict:
 
 
 def save_data(d: dict | None = None) -> None:
-    with open(DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(d if d is not None else data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(d if d is not None else data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error("Faylga yozishda xatolik: %s", e)
 
 
 data = load_data()
-
-# ---------------------------------------------------------------------
-# 3. Holatlar (state management)
-# ---------------------------------------------------------------------
-# user_steps[chat_id] = {"step": "nom", ...qo'shimcha ma'lumotlar}
 user_steps: dict[int, dict] = {}
 
 # ---------------------------------------------------------------------
-# 4. Tugma matnlari va klaviaturalar
+# 3. Tugmalar va klaviaturalar
 # ---------------------------------------------------------------------
 PROJECTS, INFO, QUESTION = "📂 Loyihalar", "ℹ️ Ma'lumot", "❓ Adminga savol"
 ORDER, ANNOUNCE, BACK = "🛍️ Buyurtma berish", "📢 E'lonlar", "⬅️ Orqaga"
-# Admin tugmalari
 A_CLIENTS, A_STATS = "👥 Mijozlar", "📊 Statistika"
 A_ADD_PROJECT, A_BROADCAST = "➕ Loyiha qo'shish", "📢 E'lon qo'yish"
 A_CONTACT, A_ORDERS = "📩 Mijozlarga murojaat", "📦 Buyurtmalar"
@@ -104,7 +92,6 @@ MENU_BUTTONS = {
 
 
 def kb(rows: list[list[str]]) -> ReplyKeyboardMarkup:
-    """Matnli tugmalardan Reply klaviatura yasaydi."""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=t) for t in row] for row in rows],
         resize_keyboard=True,
@@ -126,12 +113,10 @@ contact_menu = ReplyKeyboardMarkup(
 )
 
 # ---------------------------------------------------------------------
-# 5. Yordamchi funksiyalar
+# 4. Yordamchi funksiyalar
 # ---------------------------------------------------------------------
-
-
 def is_admin(user_id: int) -> bool:
-    return str(user_id) == ADMIN_ID
+    return str(user_id) == str(ADMIN_ID)
 
 
 def username_of(user) -> str:
@@ -139,7 +124,6 @@ def username_of(user) -> str:
 
 
 def user_card(user) -> str:
-    """Foydalanuvchi haqidagi to'liq ma'lumot (adminga yuborish uchun)."""
     saved = data["users"].get(str(user.id))
     name = saved["name"] if saved else (user.full_name or "—")
     text = f"👤 Ism: {name}\n🔗 Username: {username_of(user)}\n🆔 ID: {user.id}"
@@ -155,13 +139,11 @@ def reply_button(chat_id: int) -> InlineKeyboardMarkup:
 
 
 async def send_long(chat_id: int, text: str, **kwargs) -> None:
-    """Uzun matnni 4000 belgidan bo'lib yuboradi (Telegram limiti 4096)."""
     for i in range(0, len(text), 4000):
         await bot.send_message(chat_id, text[i:i + 4000], **kwargs)
 
 
 async def send_announcement(chat_id: int, a: dict) -> None:
-    """E'lonni turiga qarab yuboradi."""
     caption = a.get("caption")
     t = a["type"]
     if t == "text":
@@ -177,7 +159,6 @@ async def send_announcement(chat_id: int, a: dict) -> None:
 
 
 def parse_announcement(msg: Message) -> dict | None:
-    """Xabardan e'lon obyektini yasaydi (qo'llab-quvvatlanmasa None)."""
     date = datetime.now().isoformat()
     if msg.photo:
         return {"type": "photo", "file_id": msg.photo[-1].file_id, "caption": msg.caption, "date": date}
@@ -193,7 +174,6 @@ def parse_announcement(msg: Message) -> dict | None:
 
 
 async def broadcast(announcement: dict) -> tuple[int, int]:
-    """Barcha aktiv foydalanuvchilarga e'lonni tarqatadi."""
     ok = fail = 0
     for user in data["users"].values():
         if user.get("active") is False:
@@ -202,24 +182,21 @@ async def broadcast(announcement: dict) -> tuple[int, int]:
             await send_announcement(user["id"], announcement)
             ok += 1
         except TelegramForbiddenError:
-            user["active"] = False  # bot bloklangan
+            user["active"] = False
             fail += 1
         except Exception:
             fail += 1
-        await asyncio.sleep(0.05)  # Telegram limitidan oshmaslik uchun
+        await asyncio.sleep(0.05)
     save_data()
     return ok, fail
 
-
 # ---------------------------------------------------------------------
-# 6. Buyruqlar: /start, /help, /admin
+# 5. Handlers
 # ---------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(msg: Message):
     chat_id = msg.chat.id
     user_steps.pop(chat_id, None)
-
-    # Ro'yxatdan o'tgan bo'lsa — to'g'ridan-to'g'ri menyu
     user = data["users"].get(str(chat_id))
     if user:
         user["active"] = True
@@ -246,9 +223,6 @@ async def cmd_admin(msg: Message):
     await msg.answer("🔐 Admin paneli", reply_markup=admin_menu)
 
 
-# ---------------------------------------------------------------------
-# 7. Inline tugma: "Javob berish"
-# ---------------------------------------------------------------------
 @dp.callback_query(F.data.startswith("reply:"))
 async def cb_reply(q: CallbackQuery):
     await q.answer()
@@ -259,44 +233,33 @@ async def cb_reply(q: CallbackQuery):
     await bot.send_message(q.from_user.id, f"ID {target_id} ga yuboriladigan xabarni yozing:")
 
 
-# ---------------------------------------------------------------------
-# 8. Asosiy xabarlar handleri
-# ---------------------------------------------------------------------
 @dp.message(F.chat.type == "private")
 async def on_message(msg: Message):
     chat_id = msg.chat.id
     text = msg.text
 
-    # Noma'lum buyruqlarni e'tiborsiz qoldiramiz
     if text and text.startswith("/"):
         return
 
     try:
         state = user_steps.get(chat_id)
 
-        # Ro'yxatdan o'tish bosqichlari menyu tugmalaridan ustun turadi
         if state and state["step"] in ("ask_name", "ask_phone"):
             return await handle_registration(msg, state)
 
-        # Ro'yxatdan o'tmagan (admin bo'lmagan) foydalanuvchi
         if str(chat_id) not in data["users"] and not is_admin(chat_id):
             return await msg.answer("Iltimos, avval /start buyrug'ini yuboring.")
 
-        # Menyu tugmasi bosilsa — joriy jarayon bekor qilinadi
         if text in MENU_BUTTONS:
             user_steps.pop(chat_id, None)
             return await handle_button(msg)
 
-        # Aks holda — jarayon (step) davom etadi
         if state:
             await handle_step(msg, state)
     except Exception:
         logging.exception("Xatolik")
 
 
-# ---------------------------------------------------------------------
-# 9. Ro'yxatdan o'tish (ism -> telefon)
-# ---------------------------------------------------------------------
 async def handle_registration(msg: Message, state: dict):
     chat_id = msg.chat.id
 
@@ -310,7 +273,6 @@ async def handle_registration(msg: Message, state: dict):
             reply_markup=contact_menu,
         )
 
-    # ask_phone
     if not msg.contact or (msg.contact.user_id and msg.contact.user_id != msg.from_user.id):
         return await msg.answer("Iltimos, pastdagi tugmani bosing 👇", reply_markup=contact_menu)
 
@@ -326,21 +288,16 @@ async def handle_registration(msg: Message, state: dict):
     user_steps.pop(chat_id, None)
 
     await msg.answer("✅ Ma'lumotlaringiz saqlandi!", reply_markup=main_menu)
-    # Adminni yangi mijoz haqida xabardor qilamiz
     try:
         await bot.send_message(ADMIN_ID, f"🆕 Yangi foydalanuvchi:\n\n{user_card(msg.from_user)}")
     except Exception:
         pass
 
 
-# ---------------------------------------------------------------------
-# 10. Menyu tugmalari
-# ---------------------------------------------------------------------
 async def handle_button(msg: Message):
     chat_id = msg.chat.id
     text = msg.text
 
-    # ---------- Foydalanuvchi tugmalari ----------
     if text == PROJECTS:
         if not data["projects"]:
             return await msg.answer("Hali loyiha qo'shilmagan")
@@ -377,7 +334,6 @@ async def handle_button(msg: Message):
             reply_markup=ReplyKeyboardRemove(),
         )
 
-    # ---------- Admin tugmalari ----------
     if not is_admin(chat_id):
         return
 
@@ -429,15 +385,11 @@ async def handle_button(msg: Message):
         return await msg.answer('Yangi "Ma\'lumot" matnini yuboring:')
 
 
-# ---------------------------------------------------------------------
-# 11. Ko'p bosqichli jarayonlar (user_steps bo'yicha)
-# ---------------------------------------------------------------------
 async def handle_step(msg: Message, state: dict):
     chat_id = msg.chat.id
     text = msg.text
     step = state["step"]
 
-    # ----- Foydalanuvchi: adminga savol -----
     if step == "ask_question":
         if not text:
             return await msg.answer("Iltimos, savolni matn ko'rinishida yozing:")
@@ -449,7 +401,6 @@ async def handle_step(msg: Message, state: dict):
         user_steps.pop(chat_id, None)
         return await msg.answer("✅ Savolingiz adminga yuborildi.", reply_markup=main_menu)
 
-    # ----- Foydalanuvchi: buyurtma tafsilotlari -----
     if step == "order_details":
         if not text:
             return await msg.answer("Iltimos, matn ko'rinishida yozing:")
@@ -469,11 +420,9 @@ async def handle_step(msg: Message, state: dict):
         user_steps.pop(chat_id, None)
         return await msg.answer("✅ Buyurtmangiz qabul qilindi. Tez orada bog'lanamiz!", reply_markup=main_menu)
 
-    # Quyidagi bosqichlar faqat admin uchun
     if not is_admin(chat_id):
         return
 
-    # ----- Admin: loyiha qo'shish (nom -> rasm -> tavsif -> link) -----
     if step == "p_name":
         if not text:
             return await msg.answer("Nomni matn ko'rinishida kiriting:")
@@ -505,7 +454,6 @@ async def handle_step(msg: Message, state: dict):
         user_steps.pop(chat_id, None)
         return await msg.answer("✅ Loyiha qo'shildi!", reply_markup=admin_menu)
 
-    # ----- Admin: e'lon (broadcast) -----
     if step == "broadcast":
         announcement = parse_announcement(msg)
         if not announcement:
@@ -517,7 +465,6 @@ async def handle_step(msg: Message, state: dict):
         ok, fail = await broadcast(announcement)
         return await msg.answer(f"✅ Yuborildi: {ok}\n❌ Xato: {fail}", reply_markup=admin_menu)
 
-    # ----- Admin: mijozga xabar (ID -> matn) -----
     if step == "contact_id":
         if not text or not text.strip().isdigit():
             return await msg.answer("ID faqat raqamlardan iborat bo'lishi kerak:")
@@ -535,7 +482,6 @@ async def handle_step(msg: Message, state: dict):
         user_steps.pop(chat_id, None)
         return
 
-    # ----- Admin: "Ma'lumot" matnini o'zgartirish -----
     if step == "edit_info":
         if not text:
             return await msg.answer("Matn yuboring:")
@@ -544,14 +490,20 @@ async def handle_step(msg: Message, state: dict):
         user_steps.pop(chat_id, None)
         return await msg.answer("✅ Ma'lumot yangilandi.", reply_markup=admin_menu)
 
-
 # ---------------------------------------------------------------------
-# 12. Ishga tushirish
+# 6. Webhook FastAPI Yo'nalishi
 # ---------------------------------------------------------------------
-async def main():
-    print("🤖 Bot ishga tushdi...")
-    await dp.start_polling(bot)
+@app.post("/webhook")
+async def webhook_handler(request: Request):
+    try:
+        update_data = await request.json()
+        update = Update.model_validate(update_data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+        return {"status": "ok"}
+    except Exception as e:
+        logging.error("Webhook xatosi: %s", e)
+        return {"status": "error", "message": str(e)}
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+@app.get("/")
+async def root():
+    return {"message": "Bot is running via Webhook on Vercel!"}
